@@ -368,7 +368,7 @@ class ClinicalTrialKeywordMatcher:
 class StreamlinedClinicalChatbot:
     """Streamlined chatbot with keyword-based filtering and ID-based retrieval - NO COLUMN FILTERING"""
     
-    def __init__(self, df: pd.DataFrame, model: str = "gpt-4o-mini"):
+    def __init__(self, df: pd.DataFrame, model: str = "gpt-4o"):
         self.df = self._prepare_dataframe(df)
         self.model = model
         self.matcher = ClinicalTrialKeywordMatcher()
