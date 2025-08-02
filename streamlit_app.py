@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 class SuperFastClinicalChatbot:
-    """chatbot with comprehensive alias mappings and optimized search"""
+    """Chatbot with comprehensive alias mappings and optimized search"""
     
     def __init__(self, df: pd.DataFrame, model: str = "gpt-4o-mini"):
         self.df = self._prepare_dataframe(df)
@@ -316,7 +316,7 @@ class SuperFastClinicalChatbot:
         return self.df[mask] if mask.any() else self.df.head(10)
     
     def retrieve_data_ultra_fast(self, query: str) -> Dict[str, Any]:
-        """data retrieval with comprehensive search"""
+        """Data retrieval with comprehensive search"""
         try:
             # Extract and expand search terms
             search_terms = self.extract_search_terms(query)
@@ -506,29 +506,6 @@ def main():
                 except Exception as e:
                     st.error(f"❌ Error loading data: {e}")
                     return
-        
-        # Sidebar with helpful info
-        with st.sidebar:
-            st.header("🔍 Search Tips")
-            st.markdown("""
-            **Trial Aliases Supported:**
-            - CHECKMATE-511 → CM-511, CM511, etc.
-            - RELATIVITY-047 → REL-047, REL047, etc.
-            
-            **Phase Formats:**
-            - Ph3 → Phase 3, Phase III, etc.
-            
-            **Outcome Terms:**
-            - Clinical outcomes = ORR, CR, mPFS, mOS, etc.
-            - Safety outcomes = Gr ≥3 TRAEs, etc.
-            
-            **Company Aliases:**
-            - Merck → Merck/MDS, US-based Merck
-            - BMS → Bristol Myers Squibb
-            """)
-            
-            if st.button("Dataset Info"):
-                st.text(st.session_state.chatbot.get_column_info())
         
         # Initialize chat history
         if 'messages' not in st.session_state:
