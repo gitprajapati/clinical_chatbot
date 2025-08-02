@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
 import re
-from typing import List, Dict, Set, Tuple, Optional
-from langchain_experimental.agents import create_pandas_dataframe_agent
+from typing import List, Dict, Set, Tuple, Optional, Any
 from langchain_openai import ChatOpenAI
-from langchain.agents.agent_types import AgentType
 import os
-from dotenv import load_dotenv  
+from dotenv import load_dotenv
+import json
+import numpy as np
 
 load_dotenv() 
 
@@ -17,12 +17,15 @@ st.set_page_config(
     layout="wide"
 )
 
-class FlexibleClinicalChatbot:
-    """Flexible chatbot that can handle any clinical trial question without restrictive filtering"""
+class SuperFastClinicalChatbot:
+    """chatbot with comprehensive alias mappings and optimized search"""
     
     def __init__(self, df: pd.DataFrame, model: str = "gpt-4o-mini"):
         self.df = self._prepare_dataframe(df)
         self.model = model
+        self.llm = ChatOpenAI(model=self.model, temperature=0)
+        self._create_search_index()
+        self._build_alias_mappings()
         
     def _prepare_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """Prepare dataframe with ID column and clean data"""
@@ -35,200 +38,498 @@ class FlexibleClinicalChatbot:
         # Clean column names
         df_clean.columns = df_clean.columns.str.strip().str.replace("\n", " ").str.replace("  ", " ")
         
+        # Convert all object columns to string and handle NaN
+        for col in df_clean.columns:
+            if df_clean[col].dtype == 'object':
+                df_clean[col] = df_clean[col].astype(str).replace('nan', '').replace('N/A', '').replace('NA', '')
+        
         return df_clean
     
-    def get_dataset_summary(self) -> Dict:
-        """Get comprehensive dataset summary for context"""
-        summary = {
-            'total_rows': len(self.df),
-            'total_columns': len(self.df.columns),
-            'columns': list(self.df.columns),
-            'key_info': {}
+    def _create_search_index(self):
+        """Create search indexes for faster lookups"""
+        self.text_columns = []
+        self.numeric_columns = []
+        
+        for col in self.df.columns:
+            if self.df[col].dtype in ['object', 'string']:
+                self.text_columns.append(col)
+            elif self.df[col].dtype in ['int64', 'float64', 'int32', 'float32']:
+                self.numeric_columns.append(col)
+    
+    def _build_alias_mappings(self):
+        """Build comprehensive alias mappings for faster search"""
+        
+        # Trial acronym aliases
+        self.trial_aliases = {
+            # CHECKMATE variations
+            'checkmate-511': ['cm-511', 'cm511', 'cm 511', 'checkmate511', 'checkmate 511'],
+            'checkmate-067': ['cm-067', 'cm067', 'cm 067', 'checkmate067', 'checkmate 067'],
+            'checkmate-066': ['cm-066', 'cm066', 'cm 066', 'checkmate066', 'checkmate 066'],
+            
+            # RELATIVITY variations
+            'relativity-047': ['rel-047', 'rel047', 'rel 047', 'relativity047', 'relativity 047'],
+            
+            # KEYNOTE variations
+            'keynote-006': ['kn-006', 'kn006', 'kn 006', 'keynote006', 'keynote 006'],
+            'keynote-252': ['kn-252', 'kn252', 'kn 252', 'keynote252', 'keynote 252'],
+            
+            # Add more as needed
+            'combi-d': ['combid', 'combi d'],
+            'combi-v': ['combiv', 'combi v'],
+            'combi-i': ['combii', 'combi i'],
+            'columbus': ['col', 'columbus trial'],
+            'dreamseq': ['dream-seq', 'dream seq'],
+            'inspire150': ['imspire-150', 'imspire 150'],
+            'cobrim': ['co-brim', 'co brim']
         }
         
-        # Identify key columns and their unique values
-        key_column_patterns = {
-            'companies': ['company', 'sponsor', 'manufacturer', 'developer', 'pharma'],
-            'treatments': ['product', 'regimen', 'treatment', 'drug', 'therapy'],
-            'trials': ['trial', 'study', 'acronym', 'id'],
-            'phases': ['phase'],
-            'indications': ['indication', 'disease', 'cancer', 'tumor'],
-            'outcomes': ['orr', 'pfs', 'os', 'response', 'survival', 'adverse', 'safety']
+        # Phase aliases
+        self.phase_aliases = {
+            'ph3': ['phase 3', 'phase iii', 'phase3', 'phase-3', 'phase-iii'],
+            'ph2': ['phase 2', 'phase ii', 'phase2', 'phase-2', 'phase-ii'],
+            'ph1': ['phase 1', 'phase i', 'phase1', 'phase-1', 'phase-i'],
+            'ph4': ['phase 4', 'phase iv', 'phase4', 'phase-4', 'phase-iv'],
         }
         
-        for category, patterns in key_column_patterns.items():
-            matching_cols = []
-            for col in self.df.columns:
-                if any(pattern in col.lower() for pattern in patterns):
-                    matching_cols.append(col)
+        # Company aliases
+        self.company_aliases = {
+            'bms': ['bristol myers squibb', 'bristol-myers squibb', 'bristol myers', 'bristol-myers'],
+            'merck': ['merck/mds', 'merck us', 'us-based merck', 'merck & co', 'merck & co.'],
+            'roche': ['genentech', 'roche genentech'],
+            'novartis': ['novartis pharma', 'novartis ag'],
+            'pfizer': ['pfizer inc', 'pfizer inc.'],
+        }
+        
+        # Clinical outcomes aliases - comprehensive mapping
+        self.outcome_aliases = {
+            # Efficacy outcomes
+            'orr': ['overall response rate', 'response rate', 'objective response rate'],
+            'cr': ['complete response', 'complete response rate'],
+            'pfs': ['progression free survival', 'progression-free survival', 'median pfs', 'mpfs'],
+            'os': ['overall survival', 'median os', 'mos'],
+            'dor': ['duration of response', 'median dor', 'mdor'],
             
-            if matching_cols:
-                summary['key_info'][category] = {
-                    'columns': matching_cols,
-                    'sample_values': {}
-                }
-                
-                # Get sample unique values for first matching column
-                first_col = matching_cols[0]
-                unique_vals = self.df[first_col].dropna().unique()
-                summary['key_info'][category]['sample_values'][first_col] = unique_vals[:10].tolist()
+            # Safety outcomes with extensive aliases
+            'gr ≥3 traes': [
+                'gr 3+ traes', 'grade 3 and above traes', 'high grade traes',
+                'gr ≥3 treatment related adverse events', 'gr ≥3 treatment related aes',
+                'gr ≥3 treatment-related adverse events', 'gr ≥3 treatment-related aes',
+                'gr 3+ treatment related adverse events', 'gr 3+ treatment related aes',
+                'gr 3+ treatment-related adverse events', 'gr 3+ treatment-related aes',
+                'grade 3 and above treatment related adverse events',
+                'grade 3 and above treatment related aes',
+                'grade 3 and above treatment-related adverse events',
+                'grade 3 and above treatment-related aes',
+                'high grade treatment-related aes', 'high grade treatment-related adverse events'
+            ],
+            'gr 3/4 traes': [
+                'grade 3/4 traes', 'grade 3 or 4 traes', 'gr 3 or 4 traes',
+                'grade 3/4 treatment related adverse events',
+                'grade 3/4 treatment-related adverse events'
+            ],
+            'gr ≥3 teaes': [
+                'gr 3+ teaes', 'grade 3 and above teaes',
+                'gr ≥3 treatment emergent adverse events',
+                'grade 3 and above treatment emergent adverse events'
+            ],
+            'gr 3/4 teaes': [
+                'grade 3/4 teaes', 'grade 3 or 4 teaes',
+                'grade 3/4 treatment emergent adverse events'
+            ],
+            'gr ≥3 iraes': [
+                'gr 3+ iraes', 'grade 3 and above iraes',
+                'gr ≥3 immune related adverse events',
+                'grade 3 and above immune related adverse events'
+            ],
+            'gr 3/4 iraes': [
+                'grade 3/4 iraes', 'grade 3 or 4 iraes',
+                'grade 3/4 immune related adverse events'
+            ],
+            'gr ≥3 aes': [
+                'gr 3+ aes', 'grade 3 and above aes', 'high grade aes',
+                'gr ≥3 adverse events', 'grade 3 and above adverse events'
+            ],
+            'gr 3/4 aes': [
+                'grade 3/4 aes', 'grade 3 or 4 aes',
+                'grade 3/4 adverse events'
+            ]
+        }
         
-        return summary
-    
-    def create_comprehensive_agent(self) -> any:
-        """Create an agent with the full dataset and comprehensive instructions"""
+        # Default table columns - what should be shown by default
+        self.default_table_columns = [
+            'Product/Regimen Name', 'Active Developers (Companies Names)', 
+            'Highest Phase', 'Line of therapy (LoT)', 'Therapeutic Indication'
+        ]
         
-        dataset_summary = self.get_dataset_summary()
-        
-        prefix = f"""You are an expert clinical trial data analyst with access to a comprehensive clinical trial dataset.
-
-DATASET INFORMATION:
-- Total rows: {dataset_summary['total_rows']}
-- Total columns: {dataset_summary['total_columns']}
-- ALL COLUMNS AVAILABLE: {', '.join(dataset_summary['columns'])}
-
-CORE PRINCIPLES:
-1. YOU HAVE COMPLETE ACCESS TO ALL DATA - {dataset_summary['total_rows']} rows and {dataset_summary['total_columns']} columns
-2. ALWAYS extract REAL data from the dataset - never use placeholders or "Not specified"
-3. Use proper pandas operations to search and filter data
-4. Check multiple columns when searching for information
-5. Report actual values found in the dataset
-
-SEARCH METHODOLOGY:
-- Use df[column].str.contains('term', case=False, na=False) for text searches
-- Use df[df['column'] == value] for exact matches
-- Use df.loc[] and df.iloc[] to access specific data
-- Always verify data exists before making claims
-- Check related columns if primary search doesn't find data
-
-DATA PRESENTATION:
-1. Extract and display ACTUAL values from the dataset
-2. Create accurate tables with real data from the dataframe
-3. Provide comprehensive analysis based on available information
-4. Include insights and patterns found in the actual data
-5. Present findings in clean, professional markdown format
-
-CRITICAL: This dataset contains real information - find it, extract it, and report it accurately. Never guess or use placeholders.
-"""
-        
-        return create_pandas_dataframe_agent(
-            ChatOpenAI(model=self.model, temperature=0),
-            self.df,
-            verbose=False,  # Keep clean for production
-            agent_type=AgentType.OPENAI_FUNCTIONS,
-            prefix=prefix,
-            allow_dangerous_code=True,
-            max_iterations=25,  # Sufficient iterations for complex queries
-            early_stopping_method="generate"
-        )
-    
-    def _format_key_info(self, key_info: Dict) -> str:
-        """Format key dataset information for the prompt"""
-        formatted = []
-        for category, info in key_info.items():
-            if info['columns']:
-                formatted.append(f"- {category.upper()}: Columns available: {', '.join(info['columns'])}")
-                for col, values in info['sample_values'].items():
-                    if values:
-                        formatted.append(f"  Sample {col}: {', '.join(map(str, values[:5]))}")
-        return '\n'.join(formatted)
-    
-    def query(self, question: str) -> Dict[str, any]:
-        """Process any clinical trial question with full dataset access"""
-        
-        # Create agent with full dataset
-        agent = self.create_comprehensive_agent()
-        
-        # Create generalized enhancement for any question
-        enhanced_question = f"""
-        {question}
-        
-        ANALYSIS REQUIREMENTS:
-        1. Access the complete dataset with all {len(self.df)} rows and {len(self.df.columns)} columns
-        2. Use proper pandas operations to find and extract real data
-        3. Report actual values found in the dataset - never use "Not specified" without verification
-        4. Search comprehensively across relevant columns for the requested information
-        5. Present findings in professional format with accurate data tables
-        
-        Provide a complete, data-driven analysis that answers the question thoroughly.
-        """
-        
-        try:
-            result = agent.invoke({"input": enhanced_question})
-            
-            # Extract the output
-            if isinstance(result, dict):
-                output = result.get('output', str(result))
+        # If LoT doesn't exist, use alternatives
+        if 'Line of therapy (LoT)' not in self.df.columns:
+            lot_alternatives = [col for col in self.df.columns if 'line' in col.lower() or 'lot' in col.lower()]
+            if lot_alternatives:
+                self.default_table_columns[3] = lot_alternatives[0]
             else:
-                output = str(result)
+                self.default_table_columns[3] = 'Therapeutic Area'  # fallback
+    
+    def _expand_query_terms(self, query: str) -> List[str]:
+        """Expand query terms using alias mappings"""
+        query_lower = query.lower()
+        expanded_terms = [query_lower]
+        
+        # Expand trial aliases
+        for canonical, aliases in self.trial_aliases.items():
+            if canonical in query_lower:
+                expanded_terms.extend(aliases)
+            for alias in aliases:
+                if alias in query_lower:
+                    expanded_terms.append(canonical)
+                    expanded_terms.extend([a for a in aliases if a != alias])
+        
+        # Expand phase aliases
+        for canonical, aliases in self.phase_aliases.items():
+            if canonical in query_lower:
+                expanded_terms.extend(aliases)
+            for alias in aliases:
+                if alias in query_lower:
+                    expanded_terms.append(canonical)
+        
+        # Expand company aliases
+        for canonical, aliases in self.company_aliases.items():
+            if canonical in query_lower:
+                expanded_terms.extend(aliases)
+            for alias in aliases:
+                if alias in query_lower:
+                    expanded_terms.append(canonical)
+        
+        # Expand outcome aliases
+        for canonical, aliases in self.outcome_aliases.items():
+            if canonical in query_lower:
+                expanded_terms.extend(aliases)
+            for alias in aliases:
+                if alias in query_lower:
+                    expanded_terms.append(canonical)
+        
+        return list(set(expanded_terms))  # Remove duplicates
+    
+    def extract_search_terms(self, query: str) -> Dict[str, List[str]]:
+        """Extract and expand search terms from query"""
+        # Get expanded terms
+        expanded_terms = self._expand_query_terms(query)
+        
+        # Common clinical trial terms
+        trial_terms = ['checkmate', 'relativity', 'keynote', 'opdivo', 'yervoy', 'nivolumab', 'ipilimumab', 'relatlimab']
+        drug_terms = ['nivolumab', 'ipilimumab', 'relatlimab', 'pembrolizumab', 'atezolizumab', 'cobimetinib', 'vemurafenib']
+        outcome_terms = ['orr', 'pfs', 'os', 'response', 'survival', 'progression', 'overall', 'cr', 'dor', 'traes', 'teaes', 'iraes']
+        
+        # Extract terms from expanded list
+        found_trials = []
+        found_drugs = []
+        found_outcomes = []
+        
+        for term in expanded_terms:
+            # Check for trial terms
+            for trial_term in trial_terms:
+                if trial_term in term:
+                    found_trials.append(trial_term)
+            
+            # Check for drug terms
+            for drug_term in drug_terms:
+                if drug_term in term:
+                    found_drugs.append(drug_term)
+            
+            # Check for outcome terms
+            for outcome_term in outcome_terms:
+                if outcome_term in term:
+                    found_outcomes.append(outcome_term)
+        
+        # Extract quoted terms and numbers
+        quoted_terms = re.findall(r'"([^"]*)"', query)
+        number_terms = re.findall(r'\b\d+\b', query)
+        
+        return {
+            'trials': list(set(found_trials)),
+            'drugs': list(set(found_drugs)),
+            'outcomes': list(set(found_outcomes)),
+            'quoted': quoted_terms,
+            'numbers': number_terms,
+            'expanded_terms': expanded_terms,
+            'all_terms': query.lower().split()
+        }
+    
+    def search_dataframe_optimized(self, search_terms: Dict[str, List[str]]) -> pd.DataFrame:
+        """pandas-based search with alias expansion"""
+        
+        # Start with all rows
+        mask = pd.Series(True, index=self.df.index)
+        search_performed = False
+        
+        # Search using expanded terms for better matching
+        all_search_terms = (
+            search_terms.get('trials', []) +
+            search_terms.get('drugs', []) +
+            search_terms.get('outcomes', []) +
+            search_terms.get('quoted', []) +
+            search_terms.get('numbers', []) +
+            search_terms.get('expanded_terms', [])
+        )
+        
+        if all_search_terms:
+            combined_mask = pd.Series(False, index=self.df.index)
+            
+            for term in all_search_terms:
+                if not term or len(term) < 2:
+                    continue
+                    
+                term_mask = pd.Series(False, index=self.df.index)
                 
+                # Search in specific high-priority columns first
+                priority_columns = [
+                    'Trial Acronym/ID', 'Product/Regimen Name', 
+                    'Active Developers (Companies Names)', 'Highest Phase'
+                ]
+                
+                for col in priority_columns:
+                    if col in self.df.columns:
+                        try:
+                            col_mask = self.df[col].str.contains(term, case=False, na=False, regex=False)
+                            term_mask |= col_mask
+                        except:
+                            continue
+                
+                # If not found in priority columns, search all text columns
+                if not term_mask.any():
+                    for col in self.text_columns:
+                        try:
+                            col_mask = self.df[col].str.contains(term, case=False, na=False, regex=False)
+                            term_mask |= col_mask
+                        except:
+                            continue
+                
+                combined_mask |= term_mask
+            
+            if combined_mask.any():
+                mask = combined_mask
+                search_performed = True
+        
+        # If no specific search performed, return top 20 rows
+        if not search_performed:
+            return self.df.head(20)
+        
+        return self.df[mask] if mask.any() else self.df.head(10)
+    
+    def retrieve_data_ultra_fast(self, query: str) -> Dict[str, Any]:
+        """data retrieval with comprehensive search"""
+        try:
+            # Extract and expand search terms
+            search_terms = self.extract_search_terms(query)
+            
+            # Search dataframe
+            filtered_df = self.search_dataframe_optimized(search_terms)
+            
+            # Limit results for performance
+            max_records = 50
+            if len(filtered_df) > max_records:
+                filtered_df = filtered_df.head(max_records)
+            
+            # Convert to records
+            records = filtered_df.to_dict('records')
+            
+            # Get relevant columns
+            relevant_columns = self._identify_relevant_columns_fast(query, filtered_df)
+            
             return {
-                "output": output,
-                "dataset_info": {
-                    "total_rows_analyzed": len(self.df),
-                    "total_columns_available": len(self.df.columns),
-                    "query_type": "comprehensive_analysis"
-                }
+                "success": True,
+                "retrieved_data": records,
+                "columns_found": relevant_columns,
+                "total_records": len(records),
+                "search_terms_used": search_terms,
+                "filtered_df_shape": filtered_df.shape
             }
             
         except Exception as e:
-            # Simplified fallback that still ensures data access
-            try:
-                simple_agent = create_pandas_dataframe_agent(
-                    ChatOpenAI(model=self.model, temperature=0),
-                    self.df,
-                    verbose=False,
-                    agent_type=AgentType.OPENAI_FUNCTIONS,
-                    allow_dangerous_code=True,
-                    max_iterations=15
-                )
+            return {
+                "success": False,
+                "error": str(e),
+                "retrieved_data": []
+            }
+    
+    def _identify_relevant_columns_fast(self, query: str, df: pd.DataFrame) -> List[str]:
+        """Fast identification of relevant columns"""
+        query_lower = query.lower()
+        
+        # Start with default table columns
+        relevant_cols = [col for col in self.default_table_columns if col in df.columns]
+        
+        # Add outcome-specific columns based on query
+        outcome_column_mappings = {
+            'orr': ['ORR', 'ORR Notes'],
+            'cr': ['CR', 'CR Notes'],
+            'pfs': ['mPFS', 'PFS Notes', '1-yr PFS Rate', '2-yr PFS Rate'],
+            'os': ['mOS', 'OS Notes', '1-yr OS Rate', '2-yr OS Rate'],
+            'dor': ['mDoR'],
+            'safety': ['Gr 3/4 TRAEs', 'Gr ≥3 TRAEs', 'Gr 3/4 AEs', 'Gr ≥3 AEs'],
+            'traes': ['Gr 3/4 TRAEs', 'Gr ≥3 TRAEs'],
+            'adverse': ['Key AEs', 'Gr 3/4 AEs', 'Gr ≥3 AEs']
+        }
+        
+        for keyword, columns in outcome_column_mappings.items():
+            if keyword in query_lower:
+                for col_pattern in columns:
+                    matching_cols = [col for col in df.columns if col_pattern in col]
+                    relevant_cols.extend(matching_cols)
+        
+        # If comparing trials, include trial identification columns
+        if any(word in query_lower for word in ['compare', 'comparison', 'vs', 'versus']):
+            comparison_cols = ['Trial Acronym/ID', 'Product/Regimen Name', 'ORR', 'mPFS', 'mOS']
+            relevant_cols.extend([col for col in comparison_cols if col in df.columns])
+        
+        return list(set(relevant_cols))
+    
+    def generate_response_ultra_fast(self, original_query: str, retrieved_data: Dict[str, Any]) -> str:
+        """Generate response with optimized prompting"""
+        
+        if not retrieved_data["success"]:
+            return f"Error retrieving data: {retrieved_data.get('error', 'Unknown error')}"
+        
+        # Limit data for faster processing
+        data_subset = retrieved_data["retrieved_data"][:15]
+        
+        # Shorter, more focused prompt
+        response_prompt = f"""Answer this clinical trial question: {original_query}
+
+Data available ({len(data_subset)} records):
+{json.dumps(data_subset, indent=1)}
+
+Instructions:
+- Use ONLY the provided data
+- Create comparison tables if requested
+- Be concise and accurate
+- State "Not available" for missing data
+
+Answer directly:"""
+        
+        try:
+            from langchain.schema import HumanMessage
+            response = self.llm.invoke([HumanMessage(content=response_prompt)])
+            return response.content
+            
+        except Exception as e:
+            return self._create_fallback_response(original_query, retrieved_data)
+    
+    def _create_fallback_response(self, query: str, data: Dict[str, Any]) -> str:
+        """Create basic response if LLM fails"""
+        if not data["retrieved_data"]:
+            return "No relevant data found for your query."
+        
+        records = data["retrieved_data"][:10]
+        response = f"## Results for: {query}\n\nFound {len(records)} relevant records:\n\n"
+        
+        if records:
+            # Use default columns for table
+            available_cols = [col for col in self.default_table_columns if col in records[0]]
+            
+            if available_cols:
+                response += "| " + " | ".join(available_cols) + " |\n"
+                response += "| " + " | ".join(["---"] * len(available_cols)) + " |\n"
                 
-                result = simple_agent.invoke({"input": question})
-                output = result.get('output', str(result)) if isinstance(result, dict) else str(result)
-                
-                return {
-                    "output": output,
-                    "dataset_info": {
-                        "total_rows_analyzed": len(self.df),
-                        "total_columns_available": len(self.df.columns),
-                        "query_type": "fallback_analysis"
-                    }
-                }
-                
-            except Exception as e2:
-                return {
-                    "output": f"Error processing query: {str(e2)}\n\nDataset contains {len(self.df)} rows and {len(self.df.columns)} columns of clinical trial data.",
-                    "dataset_info": {
-                        "total_rows_analyzed": len(self.df),
-                        "error": str(e2)
-                    }
-                }
+                for record in records[:5]:
+                    row = []
+                    for col in available_cols:
+                        value = str(record.get(col, "N/A"))[:50]  # Truncate long values
+                        row.append(value)
+                    response += "| " + " | ".join(row) + " |\n"
+        
+        return response
+    
+    def query(self, question: str) -> Dict[str, Any]:
+        """Process query with maximum optimization"""
+        
+        # Step 1: Ultra-fast data retrieval
+        start_time = pd.Timestamp.now()
+        retrieved_data = self.retrieve_data_ultra_fast(question)
+        retrieval_time = (pd.Timestamp.now() - start_time).total_seconds()
+        
+        # Step 2: Fast response generation
+        start_time = pd.Timestamp.now()
+        response = self.generate_response_ultra_fast(question, retrieved_data)
+        response_time = (pd.Timestamp.now() - start_time).total_seconds()
+        
+        return {
+            "output": response,
+            "retrieved_data": retrieved_data,
+            "timing": {
+                "retrieval_seconds": round(retrieval_time, 2),
+                "response_seconds": round(response_time, 2),
+                "total_seconds": round(retrieval_time + response_time, 2)
+            },
+            "dataset_info": {
+                "total_rows_analyzed": len(self.df),
+                "records_found": retrieved_data.get("total_records", 0),
+                "query_type": "ultra_fast_search"
+            }
+        }
+    
+    def get_column_info(self) -> str:
+        """Get streamlined column information"""
+        key_cols = ['Product/Regimen Name', 'Trial Acronym/ID', 'Active Developers (Companies Names)', 
+                   'Highest Phase', 'ORR', 'mPFS', 'mOS']
+        info = []
+        
+        for col in key_cols:
+            if col in self.df.columns:
+                unique_count = self.df[col].nunique()
+                sample_values = self.df[col].dropna().unique()[:3]
+                info.append(f"**{col}**: {unique_count} unique values")
+        
+        return "\n".join(info)
 
 
 # Streamlit App
 def main():
     st.title("🏥 Clinical Trial Chatbot")
+    st.caption("Enhanced with comprehensive alias mappings for maximum speed and accuracy")
     
     # Load default data
     default_file_path = "Sample Data.xlsx"
     
     if os.path.exists(default_file_path):
         if 'data_loaded' not in st.session_state:
-            with st.spinner(f"Loading data..."):
+            with st.spinner("Loading data..."):
                 try:
                     df = pd.read_excel(default_file_path)
                     
                     # Store data and chatbot in session state
                     st.session_state.df = df
-                    st.session_state.chatbot = FlexibleClinicalChatbot(df)
+                    st.session_state.chatbot = SuperFastClinicalChatbot(df)
                     st.session_state.data_loaded = True
                     st.session_state.messages = []
                     
-                    st.success(f"✅ Data loaded successfully!")
+                    st.success(f"✅ Data loaded! ({len(df)} rows, {len(df.columns)} columns)")
                             
                 except Exception as e:
-                    st.error(f"❌ Error loading data file: {e}")
+                    st.error(f"❌ Error loading data: {e}")
                     return
+        
+        # Sidebar with helpful info
+        with st.sidebar:
+            st.header("🔍 Search Tips")
+            st.markdown("""
+            **Trial Aliases Supported:**
+            - CHECKMATE-511 → CM-511, CM511, etc.
+            - RELATIVITY-047 → REL-047, REL047, etc.
+            
+            **Phase Formats:**
+            - Ph3 → Phase 3, Phase III, etc.
+            
+            **Outcome Terms:**
+            - Clinical outcomes = ORR, CR, mPFS, mOS, etc.
+            - Safety outcomes = Gr ≥3 TRAEs, etc.
+            
+            **Company Aliases:**
+            - Merck → Merck/MDS, US-based Merck
+            - BMS → Bristol Myers Squibb
+            """)
+            
+            if st.button("Dataset Info"):
+                st.text(st.session_state.chatbot.get_column_info())
         
         # Initialize chat history
         if 'messages' not in st.session_state:
@@ -240,7 +541,7 @@ def main():
                 st.markdown(message["content"])
         
         # Chat input
-        if prompt := st.chat_input("Ask any question about the clinical trials..."):
+        if prompt := st.chat_input("Ask about clinical trials..."):
             # Add user message
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
@@ -248,36 +549,31 @@ def main():
             
             # Get response
             with st.chat_message("assistant"):
-                with st.spinner("Analyzing data..."):
-                    try:
-                        result = st.session_state.chatbot.query(prompt)
-                        
-                        # Display the result
-                        if result and result.get("output"):
-                            st.markdown(result["output"])
-                        else:
-                            st.error("No response generated. Please try rephrasing your question.")
-                        
-                        # Add assistant message
-                        st.session_state.messages.append({
-                            "role": "assistant", 
-                            "content": result.get("output", "No response generated") if result else "Error occurred",
-                            "dataset_info": result.get("dataset_info", {}) if result else {}
-                        })
-                        
-                    except Exception as e:
-                        error_msg = f"Error processing query: {str(e)}"
-                        st.error(error_msg)
-                        st.session_state.messages.append({
-                            "role": "assistant", 
-                            "content": error_msg,
-                            "dataset_info": {"error": str(e)}
-                        })
-            
+                try:
+                    result = st.session_state.chatbot.query(prompt)
+                    
+                    # Display result
+                    if result and result.get("output"):
+                        st.markdown(result["output"])
+                    else:
+                        st.error("No response generated.")
+                    
+                    # Add to chat history
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": result.get("output", "No response") if result else "Error"
+                    })
+                    
+                except Exception as e:
+                    error_msg = f"Error: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": error_msg
+                    })
     else:
-        # Error message when default file is not found
-        st.error(f"❌ Default data file '{default_file_path}' not found!")
-        st.info("Please ensure the Sample Data.xlsx file is in the same directory as this script.")
+        st.error(f"❌ File '{default_file_path}' not found!")
+        st.info("Ensure Sample Data.xlsx is in the same directory.")
 
 if __name__ == "__main__":
     main()
