@@ -7,6 +7,7 @@ import os
 from dotenv import load_dotenv
 import json
 import numpy as np
+import plotly.express as px
 
 load_dotenv() 
 
@@ -207,7 +208,7 @@ class SuperFastClinicalChatbot:
                 if alias in query_lower:
                     expanded_terms.append(canonical)
         
-        return list(set(expanded_terms))  # Remove duplicates
+        return list(set(expanded_terms)) 
     
     def extract_search_terms(self, query: str) -> Dict[str, List[str]]:
         """Extract and expand search terms from query"""
@@ -341,6 +342,7 @@ class SuperFastClinicalChatbot:
                 "columns_found": relevant_columns,
                 "total_records": len(records),
                 "search_terms_used": search_terms,
+                "filtered_df": filtered_df,
                 "filtered_df_shape": filtered_df.shape
             }
             
@@ -382,6 +384,11 @@ class SuperFastClinicalChatbot:
             relevant_cols.extend([col for col in comparison_cols if col in df.columns])
         
         return list(set(relevant_cols))
+    
+    def extract_metrics_from_question(self, question: str, metric_list: List[str]) -> List[str]:
+        """Extracts metrics mentioned in the user's question."""
+        q_lower = question.lower()
+        return [metric for metric in metric_list if any(tok in q_lower for tok in re.split(r'[\s\-/()]+', metric.lower()) if len(tok) >= 3)]
     
     def generate_response_ultra_fast(self, original_query: str, retrieved_data: Dict[str, Any]) -> str:
         """Generate response with optimized prompting"""
@@ -482,6 +489,76 @@ Answer directly:"""
         return "\n".join(info)
 
 
+def display_bar_charts(df, arm_col, metric_cols, base_key=""):
+    """Display bar charts for selected metrics"""
+    st.markdown("### 📊 Arm-wise Metrics Breakdown")
+
+    df = df.copy()
+
+    # Ensure unique arms
+    if df[arm_col].duplicated().any():
+        df[arm_col] = df[arm_col] + " - arm " + df.groupby(arm_col).cumcount().add(1).astype(str)
+
+    # Melt to long format
+    melted_df = pd.melt(df[[arm_col] + metric_cols], id_vars=arm_col,
+                        var_name="Metric", value_name="RawValue")
+    melted_df["RawValue"] = melted_df["RawValue"].astype(str).str.strip()
+
+    missing_keywords = {"", "na", "n/a", "nr", "nan", "none", "null", "not reported"}
+    melted_df["IsMissing"] = melted_df["RawValue"].str.lower().isin(missing_keywords)
+
+    # Extract numeric values
+    melted_df["Value"] = (
+        melted_df["RawValue"]
+        .str.replace('%', '', regex=False)
+        .str.replace(r'[^\d\.\-]+', '', regex=True)
+    )
+    melted_df["Value"] = pd.to_numeric(melted_df["Value"], errors='coerce')
+    melted_df["PlotValue"] = melted_df["Value"]
+    melted_df.loc[melted_df["IsMissing"], "PlotValue"] = 0.3  # thin bar
+    melted_df.loc[melted_df["IsMissing"], "TextPosX"] = 2.5  # fixed text location for missing values
+    melted_df.loc[~melted_df["IsMissing"], "TextPosX"] = melted_df["PlotValue"]
+    melted_df["Text"] = melted_df["RawValue"].str.upper()
+
+    color_map = {metric: px.colors.qualitative.Set3[i % 10] for i, metric in enumerate(melted_df["Metric"].unique())}
+    melted_df["Color"] = melted_df["Metric"].map(color_map)
+
+    fig = px.bar(
+        melted_df,
+        x="PlotValue",
+        y=arm_col,
+        color="Metric",
+        facet_col="Metric",
+        facet_col_wrap=5,
+        orientation="h",
+        text="Text",
+        color_discrete_map=color_map
+    )
+
+    fig.update_traces(
+        textposition="outside",
+        textfont=dict(size=14),
+        cliponaxis=False
+    )
+
+    fig.update_layout(
+        height=450 + 60 * len(df),
+        font=dict(size=14),
+        showlegend=False,
+        margin=dict(l=60, r=30, t=50, b=60),
+        plot_bgcolor="rgba(0,0,0,0)"
+    )
+
+    fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1].strip()))
+    fig.for_each_xaxis(lambda x: x.update(title='', showticklabels=False))
+    fig.update_yaxes(title='', automargin=True)
+
+    if melted_df["IsMissing"].any():
+        st.warning("Some metric values were not reported: 'NR', 'NA', or similar placeholders.")
+
+    st.plotly_chart(fig, use_container_width=True, key=f"{base_key}_bar_chart")
+
+
 # Streamlit App
 def main():
     st.title("🏥 Clinical Trial Chatbot")
@@ -531,6 +608,60 @@ def main():
                     # Display result
                     if result and result.get("output"):
                         st.markdown(result["output"])
+                        
+                        # Check if we should show visualization
+                        retrieved_data = result.get("retrieved_data", {})
+                        if retrieved_data.get("success") and retrieved_data.get("filtered_df") is not None:
+                            filtered_df = retrieved_data["filtered_df"]
+                            
+                            # Identify trial ID column
+                            trial_id_col = next((col for col in [
+                                "Trial Acronym/ID", "Trial Name", "Trial ID", 
+                                "Product/Regimen Name", "Product/Regimen"
+                            ] if col in filtered_df.columns), None)
+                            
+                            if trial_id_col and len(filtered_df) > 0:
+                                # Get all available metric columns
+                                all_metrics = [
+                                    "ORR", "CR", "PR", "mPFS", "mOS", "DCR", "mDoR",
+                                    "1-yr PFS Rate", "2-yr PFS Rate", "3-yr PFS Rate",
+                                    "1-yr OS Rate", "2-yr OS Rate", "3-yr OS Rate",
+                                    "Gr 3/4 TRAEs", "Gr 3/4 TEAEs", "Gr 3/4 irAEs",
+                                    "Tx-related Deaths (Gr 5 TRAEs)", "All Deaths (Gr 5 AEs)"
+                                ]
+                                
+                                # Find which metrics are in the filtered dataframe
+                                available_metrics = [m for m in all_metrics if m in filtered_df.columns]
+                                
+                                if available_metrics:
+                                    # Extract mentioned metrics from the query
+                                    mentioned_metrics = st.session_state.chatbot.extract_metrics_from_question(
+                                        prompt, available_metrics
+                                    )
+                                    
+                                    # Default to mentioned metrics or first 3 available
+                                    default_metrics = mentioned_metrics if mentioned_metrics else available_metrics[:3]
+                                    
+                                    # Create unique key for this visualization
+                                    viz_key = f"viz_{len(st.session_state.messages)}"
+                                    
+                                    # Metric selection
+                                    st.markdown(f"#### Select Metrics to Visualize")
+                                    selected_metrics = st.multiselect(
+                                        "Metrics",
+                                        options=available_metrics,
+                                        default=default_metrics,
+                                        key=f"{viz_key}_metrics"
+                                    )
+                                    
+                                    # Display charts if metrics selected
+                                    if selected_metrics:
+                                        display_bar_charts(
+                                            filtered_df,
+                                            trial_id_col,
+                                            selected_metrics,
+                                            base_key=viz_key
+                                        )
                     else:
                         st.error("No response generated.")
                     
