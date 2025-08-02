@@ -485,7 +485,6 @@ Answer directly:"""
 # Streamlit App
 def main():
     st.title("🏥 Clinical Trial Chatbot")
-    st.caption("Enhanced with comprehensive alias mappings for maximum speed and accuracy")
     
     # Load default data
     default_file_path = "Sample Data.xlsx"
