@@ -208,14 +208,13 @@ CRITICAL: This dataset contains real information - find it, extract it, and repo
 # Streamlit App
 def main():
     st.title("🏥 Clinical Trial Chatbot")
-    st.markdown("**Comprehensive clinical trial data analysis - Ask any question!**")
     
     # Load default data
     default_file_path = "Sample Data.xlsx"
     
     if os.path.exists(default_file_path):
         if 'data_loaded' not in st.session_state:
-            with st.spinner(f"Loading data from {default_file_path}..."):
+            with st.spinner(f"Loading data..."):
                 try:
                     df = pd.read_excel(default_file_path)
                     
@@ -226,29 +225,6 @@ def main():
                     st.session_state.messages = []
                     
                     st.success(f"✅ Data loaded successfully!")
-                    st.info(f"📊 **Dataset:** {len(df)} rows, {len(df.columns)} columns - Ready for any clinical trial question!")
-                    
-                    # Show dataset overview
-                    with st.expander("📋 Dataset Overview"):
-                        st.write("**Available for analysis:**")
-                        st.write(f"- **Total trials/entries:** {len(df)}")
-                        st.write(f"- **Data columns:** {len(df.columns)}")
-                        
-                        # Show sample columns
-                        st.write("**Key column categories:**")
-                        col_categories = {
-                            'Trial Information': [col for col in df.columns if any(term in col.lower() for term in ['trial', 'study', 'acronym', 'id'])],
-                            'Treatment/Product': [col for col in df.columns if any(term in col.lower() for term in ['product', 'regimen', 'treatment', 'drug'])],
-                            'Company/Sponsor': [col for col in df.columns if any(term in col.lower() for term in ['company', 'sponsor', 'manufacturer'])],
-                            'Outcomes/Results': [col for col in df.columns if any(term in col.lower() for term in ['orr', 'pfs', 'os', 'response', 'survival', 'adverse'])],
-                            'Study Details': [col for col in df.columns if any(term in col.lower() for term in ['phase', 'indication', 'population', 'line'])]
-                        }
-                        
-                        for category, cols in col_categories.items():
-                            if cols:
-                                st.write(f"- **{category}:** {len(cols)} columns")
-                        
-                        st.write(f"- **All columns:** {', '.join(df.columns[:10])}{'...' if len(df.columns) > 10 else ''}")
                             
                 except Exception as e:
                     st.error(f"❌ Error loading data file: {e}")
@@ -258,48 +234,10 @@ def main():
         if 'messages' not in st.session_state:
             st.session_state.messages = []
         
-        # Show example questions if no chat history
-        if not st.session_state.messages:
-            st.markdown("### 💡 Example Questions You Can Ask:")
-            st.markdown("""
-            **Company/Sponsor Analysis:**
-            - *"Show me all Merck/MSD regimens in melanoma"*
-            - *"What trials is Bristol Myers Squibb running?"*
-            - *"Compare Roche vs Novartis clinical outcomes"*
-            
-            **Treatment Comparisons:**
-            - *"Compare pembrolizumab vs nivolumab efficacy"*
-            - *"What are the best ORR rates across all treatments?"*
-            - *"Show me combination vs monotherapy results"*
-            
-            **Trial-Specific Queries:**
-            - *"What are the results from CHECKMATE-067?"*
-            - *"Show me all Phase 3 melanoma trials"*
-            - *"Compare KEYNOTE vs CHECKMATE trial outcomes"*
-            
-            **Safety Analysis:**
-            - *"Which treatments have the lowest Grade 3+ adverse events?"*
-            - *"Compare safety profiles across all regimens"*
-            - *"Show me treatment-related deaths by regimen"*
-            
-            **General Analysis:**
-            - *"What's the overall landscape of melanoma treatments?"*
-            - *"Show me trends in clinical trial outcomes"*
-            - *"Which indications have the most trial activity?"*
-            """)
-        
         # Display chat history
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
-                if "dataset_info" in message and message["role"] == "assistant":
-                    with st.expander("📊 Analysis Details"):
-                        dataset_info = message["dataset_info"]
-                        st.write(f"**Rows analyzed:** {dataset_info.get('total_rows_analyzed', 'N/A')}")
-                        st.write(f"**Columns available:** {dataset_info.get('total_columns_available', 'N/A')}")
-                        st.write(f"**Analysis type:** {dataset_info.get('query_type', 'N/A')}")
-                        if 'error' in dataset_info:
-                            st.write(f"**Note:** {dataset_info['error']}")
         
         # Chat input
         if prompt := st.chat_input("Ask any question about the clinical trials..."):
@@ -310,7 +248,7 @@ def main():
             
             # Get response
             with st.chat_message("assistant"):
-                with st.spinner("Analyzing the complete dataset..."):
+                with st.spinner("Analyzing data..."):
                     try:
                         result = st.session_state.chatbot.query(prompt)
                         
@@ -335,46 +273,11 @@ def main():
                             "content": error_msg,
                             "dataset_info": {"error": str(e)}
                         })
-        
-        # Sidebar with helpful information
-        with st.sidebar:
-            st.markdown("### 🎯 Query Tips")
-            st.markdown("""
-            **The chatbot can handle:**
-            - Any company or sponsor questions
-            - Treatment comparisons
-            - Safety and efficacy analysis
-            - Trial-specific queries
-            - Phase or indication filtering
-            - Custom data requests
-            
-            **Just ask naturally!** The AI will search the entire dataset to find relevant information.
-            """)
-            
-            # Clear chat button
-            if st.button("🗑️ Clear Chat History"):
-                st.session_state.messages = []
-                st.rerun()
-            
-            # Dataset stats
-            st.markdown("### 📊 Dataset Stats")
-            if 'df' in st.session_state:
-                df = st.session_state.df
-                st.write(f"📈 Total entries: {len(df)}")
-                st.write(f"📋 Total columns: {len(df.columns)}")
-                st.write(f"🏥 Ready for analysis!")
             
     else:
         # Error message when default file is not found
         st.error(f"❌ Default data file '{default_file_path}' not found!")
         st.info("Please ensure the Sample Data.xlsx file is in the same directory as this script.")
-        
-        st.markdown("### 📁 File Requirements")
-        st.markdown("""
-        - Place your Excel file named `Sample Data.xlsx` in the same folder as this script
-        - The file should contain clinical trial data with appropriate columns
-        - Supported formats: .xlsx, .xls
-        """)
 
 if __name__ == "__main__":
     main()
