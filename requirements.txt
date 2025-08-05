@@ -10,3 +10,4 @@ openpyxl
 python-dotenv
 tabulate
 plotly
+faiss-cpu
