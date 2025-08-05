@@ -1,3 +1,7 @@
+# --- Forcing smaller, CPU-only versions of torch to stay under deployment limits ---
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- Your App's Main Dependencies ---
 streamlit 
 pandas 
 langchain-experimental 
@@ -5,3 +9,4 @@ langchain-openai
 openpyxl
 python-dotenv
 tabulate
+plotly
