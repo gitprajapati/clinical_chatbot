@@ -826,22 +826,22 @@ def create_visualization(viz_data: Dict[str, Any], message_idx: int):
     
     if not df.empty:
         # Create expandable section for trial arm details
-        with st.expander("📊 **Visualization Based on Referenced Treatments**", expanded=False):
-            st.markdown("**Trial arms included in analysis:**")
-            for i, arm_id in enumerate(used_trial_arms, 1):
-                if '||' in arm_id:
-                    parts = arm_id.split('||')
-                    if len(parts) >= 4:
-                        trial_part, product_part, comparator_part, row_idx = parts[0], parts[1], parts[2], parts[3]
-                        st.markdown(f"• **{trial_part}** - {product_part} vs {comparator_part}")
-                    elif len(parts) >= 3:
-                        trial_part, product_part, comparator_part = parts[0], parts[1], parts[2]
-                        st.markdown(f"• **{trial_part}** - {product_part} vs {comparator_part}")
-                    else:
-                        trial_part, product_part = parts[0], parts[1]
-                        st.markdown(f"• **{trial_part}** - {product_part}")
-                else:
-                    st.markdown(f"• {arm_id}")
+        # with st.expander("📊 **Visualization Based on Referenced Treatments**", expanded=False):
+        #     st.markdown("**Trial arms included in analysis:**")
+        #     for i, arm_id in enumerate(used_trial_arms, 1):
+        #         if '||' in arm_id:
+        #             parts = arm_id.split('||')
+        #             if len(parts) >= 4:
+        #                 trial_part, product_part, comparator_part, row_idx = parts[0], parts[1], parts[2], parts[3]
+        #                 st.markdown(f"• **{trial_part}** - {product_part} vs {comparator_part}")
+        #             elif len(parts) >= 3:
+        #                 trial_part, product_part, comparator_part = parts[0], parts[1], parts[2]
+        #                 st.markdown(f"• **{trial_part}** - {product_part} vs {comparator_part}")
+        #             else:
+        #                 trial_part, product_part = parts[0], parts[1]
+        #                 st.markdown(f"• **{trial_part}** - {product_part}")
+        #         else:
+        #             st.markdown(f"• {arm_id}")
         
         # Get all available metrics from the dataframe
         all_possible_metrics = [
@@ -892,7 +892,7 @@ def create_visualization(viz_data: Dict[str, Any], message_idx: int):
 
 
 def main():
-    st.markdown('<h1 class="main-header">🔬 Clinical Trial AI Assistant</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">Clinical Trial Assistant</h1>', unsafe_allow_html=True)
     
     # Initialize session state
     if 'messages' not in st.session_state:
