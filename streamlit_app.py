@@ -781,7 +781,7 @@ def display_bar_charts(df: pd.DataFrame, trial_col: str, metric_cols: List[str],
     # Update layout for better appearance with dynamic sizing
     fig.update_traces(
         textposition="outside",
-        textfont=dict(size=10, color="rgba(255,255,255,0.9)"),  # White text with slight transparency
+        textfont=dict(size=10, color="black"),  # Black text for white background
         cliponaxis=False
     )
     
@@ -792,23 +792,23 @@ def display_bar_charts(df: pd.DataFrame, trial_col: str, metric_cols: List[str],
         height=chart_height,
         showlegend=False,
         margin=dict(l=250, r=150, t=100, b=50),  # Increased left margin for longer labels
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)"
+        plot_bgcolor="white",  # White background for plot area
+        paper_bgcolor="white"  # White background for entire chart
     )
     
     # Clean facet titles and axes
     fig.for_each_annotation(lambda a: a.update(
         text=a.text.split("=")[-1], 
-        font=dict(size=12, color="rgba(255,255,255,0.9)")
+        font=dict(size=12, color="black")  # Black text for white background
     ))
     fig.for_each_xaxis(lambda x: x.update(
         title='', 
         showticklabels=False,
-        gridcolor="rgba(255,255,255,0.2)"
+        gridcolor="rgba(0,0,0,0.1)"  # Light gray grid for white background
     ))
     fig.for_each_yaxis(lambda y: y.update(
         title='',
-        tickfont=dict(size=9, color="rgba(255,255,255,0.9)")
+        tickfont=dict(size=9, color="black")  # Black text for white background
     ))
     
     st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_chart")
