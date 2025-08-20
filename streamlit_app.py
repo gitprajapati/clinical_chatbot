@@ -97,6 +97,7 @@ class ClinicalChatWithFAISS:
             'combi-d': ['combid', 'combi d', 'combination d'],
             'columbus': ['col', 'columbus trial', 'columbus study'],
             'cobrim': ['co-brim', 'co brim', 'cobrim trial'],
+            'relativity-047': ['relativity047', 'relativity 047', 'rel-047', 'rel047'],
         }
         
         # Phase aliases
@@ -123,6 +124,7 @@ class ClinicalChatWithFAISS:
             'vemurafenib': ['vemu', 'zelboraf', 'plx4032'],
             'dabrafenib': ['dabra', 'tafinlar'],
             'trametinib': ['trame', 'mekinist'],
+            'relatlimab': ['relatl', 'lag-3', 'bms-986016']
         }
         
         # Outcome aliases
@@ -222,7 +224,7 @@ class ClinicalChatWithFAISS:
         # Check for trial names
         trial_patterns = [
             r'checkmate[-\s]?\d+', r'keynote[-\s]?\d+', r'dreamseq',
-            r'combi[-\s][div]', r'columbus', r'cobrim'
+            r'combi[-\s][div]', r'columbus', r'cobrim', r'relativity[-\s]?\d+'
         ]
         
         for pattern in trial_patterns:
@@ -323,6 +325,10 @@ Instructions:
 5. Be concise but thorough
 6. Use markdown formatting for better readability
 7. **CRITICAL**: At the end of your response, include a section called "**TRIAL_ARMS_USED:**" followed by a comma-separated list of the exact "UNIQUE_ARM_ID" values for ALL specific trial arms/treatments you referenced in your answer. Each UNIQUE_ARM_ID contains the trial ID, treatment regimen, comparator, and row index.
+8. **VERY IMPORTANT**: When comparing specific treatments (like "nivolumab monotherapy"), make sure you identify the exact treatment arms that match that description. For example:
+   - If asked about "nivolumab monotherapy" vs "combination therapy", only include arms where the Product/Regimen Name contains "Nivolumab" alone, not "Nivolumab + other drugs"
+   - Be precise about which specific treatment regimen you're discussing
+9. Provide only the direct answer to the asked question. Do not generate your own questions, add extra information, or give irrelevant answers.
 
 Format for trial arms used:
 **TRIAL_ARMS_USED:** UNIQUE_ARM_ID1, UNIQUE_ARM_ID2, UNIQUE_ARM_ID3
@@ -335,7 +341,7 @@ Answer:"""
             full_response = response.content
             
             # Extract used trial arms from response
-            used_trial_arms = self._extract_used_trial_arms(full_response, search_results)
+            used_trial_arms = self._extract_used_trial_arms(full_response, search_results, query)
             
             # Clean the response by removing the TRIAL_ARMS_USED section
             clean_response = re.sub(r'\*\*TRIAL_ARMS_USED:\*\*.*$', '', full_response, flags=re.MULTILINE | re.DOTALL).strip()
@@ -403,7 +409,7 @@ Answer:"""
         6. Return 3-5 metrics maximum for clear visualization
         7. If efficacy is the focus, prioritize: ORR, mPFS, mOS
         8. If safety is the focus, prioritize: Gr 3/4 TRAEs, Gr ≥3 TRAEs
-        
+  
         Return ONLY a comma-separated list of metric names from the available metrics.
         Example: ORR, mPFS, mOS, Gr 3/4 TRAEs
         
@@ -457,8 +463,8 @@ Answer:"""
             
             return mentioned_metrics[:5]  # Limit to 5 metrics
     
-    def _extract_used_trial_arms(self, response: str, search_results: pd.DataFrame) -> List[str]:
-        """Extract trial arm IDs that the LLM mentioned it used"""
+    def _extract_used_trial_arms(self, response: str, search_results: pd.DataFrame, query: str = "") -> List[str]:
+        """Extract trial arm IDs that the LLM mentioned it used with improved accuracy"""
         # Look for the TRIAL_ARMS_USED section
         arms_used_match = re.search(r'\*\*TRIAL_ARMS_USED:\*\*\s*(.+?)(?:\n|$)', response, re.IGNORECASE | re.DOTALL)
         
@@ -481,80 +487,142 @@ Answer:"""
                             # Try to get by row index first (most accurate)
                             row_idx = int(row_idx)
                             if row_idx in search_results.index:
-                                valid_arms.append(mentioned_arm)
-                                continue
+                                # Validate that this row actually matches what we expect
+                                row = search_results.loc[row_idx]
+                                
+                                # Additional validation: check if this arm matches the query intent
+                                if self._validate_arm_matches_query(row, query, response):
+                                    valid_arms.append(mentioned_arm)
+                                    continue
                         except (ValueError, KeyError):
                             pass
                         
-                        # Fallback to matching by content
+                        # Fallback to matching by content with validation
                         matching_rows = search_results[
                             (search_results['Trial Acronym/ID'].astype(str).str.contains(str(trial_part), case=False, na=False)) &
                             (search_results['Product/Regimen Name'].astype(str).str.contains(str(product_part), case=False, na=False)) &
                             (search_results['Comparator'].astype(str).str.contains(str(comparator_part), case=False, na=False))
                         ]
                         
-                        if not matching_rows.empty:
-                            # Use the first matching row's actual values
-                            row = matching_rows.iloc[0]
-                            actual_trial = str(row['Trial Acronym/ID'])
-                            actual_product = str(row['Product/Regimen Name'])
-                            actual_comparator = str(row['Comparator'])
-                            actual_row_idx = matching_rows.index[0]
-                            valid_arms.append(f"{actual_trial}||{actual_product}||{actual_comparator}||{actual_row_idx}")
+                        for _, row in matching_rows.iterrows():
+                            if self._validate_arm_matches_query(row, query, response):
+                                actual_trial = str(row['Trial Acronym/ID'])
+                                actual_product = str(row['Product/Regimen Name'])
+                                actual_comparator = str(row['Comparator'])
+                                actual_row_idx = row.name
+                                valid_arms.append(f"{actual_trial}||{actual_product}||{actual_comparator}||{actual_row_idx}")
+                                break  # Only take the first matching valid arm
             
             if valid_arms:
                 return valid_arms
         
         # Fallback: try to extract from response content if TRIAL_ARMS_USED section not found
-        return self._fallback_trial_arm_extraction(response, search_results)
+        return self._fallback_trial_arm_extraction(response, search_results, query)
     
-    def _fallback_trial_arm_extraction(self, response: str, search_results: pd.DataFrame) -> List[str]:
-        """Fallback method to extract trial arms from response content"""
+    def _validate_arm_matches_query(self, row: pd.Series, query: str, response: str) -> bool:
+        """Validate that a trial arm matches the intent of the query and response"""
+        query_lower = query.lower()
+        response_lower = response.lower()
+        product_name = str(row.get('Product/Regimen Name', '')).lower()
+        
+        # Check for specific treatment intent in the query
+        if 'monotherapy' in query_lower or 'mono' in query_lower:
+            # If query asks for monotherapy, ensure we're not including combination arms
+            combination_indicators = ['+', 'combination', 'combo', 'plus']
+            if any(indicator in product_name for indicator in combination_indicators):
+                return False
+        
+        if 'combination' in query_lower or 'combo' in query_lower:
+            # If query asks for combination, ensure we're including combination arms
+            combination_indicators = ['+', 'combination', 'combo', 'plus']
+            if not any(indicator in product_name for indicator in combination_indicators):
+                return False
+        
+        # For nivolumab monotherapy specifically
+        if 'nivolumab' in query_lower and ('monotherapy' in query_lower or 'mono' in query_lower):
+            if 'nivolumab' in product_name:
+                # Make sure it's not a combination (no +, no other drug names)
+                other_drugs = ['relatlimab', 'ipilimumab', 'pembrolizumab', 'dabrafenib', 'trametinib']
+                if any(drug in product_name for drug in other_drugs) or '+' in product_name:
+                    return False
+                return True
+            return False
+        
+        # For specific drug combinations mentioned in query
+        drug_combinations = [
+            (['nivolumab', 'ipilimumab'], ['nivolumab', 'ipilimumab']),
+            (['nivolumab', 'relatlimab'], ['nivolumab', 'relatlimab']),
+            (['dabrafenib', 'trametinib'], ['dabrafenib', 'trametinib']),
+            (['pembrolizumab'], ['pembrolizumab'])
+        ]
+        
+        # Check if query mentions specific drug combinations
+        for query_drugs, product_drugs in drug_combinations:
+            if all(drug in query_lower for drug in query_drugs):
+                # Check if this product contains all the required drugs
+                if all(drug in product_name for drug in product_drugs):
+                    return True
+        
+        # For relatlimab + nivolumab combinations (legacy check)
+        if ('relatlimab' in query_lower and 'nivolumab' in query_lower):
+            if 'relatlimab' in product_name and 'nivolumab' in product_name:
+                return True
+        
+        # For ipilimumab + nivolumab combinations
+        if ('ipilimumab' in query_lower and 'nivolumab' in query_lower):
+            if 'ipilimumab' in product_name and 'nivolumab' in product_name:
+                return True
+        
+        return True  # Default to true if no specific validation needed
+    
+    def _fallback_trial_arm_extraction(self, response: str, search_results: pd.DataFrame, query: str = "") -> List[str]:
+        """Fallback method to extract trial arms from response content with better logic"""
         required_cols = ['Trial Acronym/ID', 'Product/Regimen Name', 'Comparator']
         if not all(col in search_results.columns for col in required_cols):
             return []
         
         mentioned_arms = []
         response_lower = response.lower()
+        query_lower = query.lower()
         
-        # Look for specific drug combinations mentioned in response
-        drug_patterns = {
-            'pembrolizumab': ['pembrolizumab', 'keytruda', 'pembro'],
-            'nivolumab': ['nivolumab', 'opdivo', 'nivo'],
-            'ipilimumab': ['ipilimumab', 'yervoy', 'ipi'],
-            'relatlimab': ['relatlimab', 'relatl'],
-            'dabrafenib': ['dabrafenib', 'tafinlar'],
-            'trametinib': ['trametinib', 'mekinist'],
-            'vemurafenib': ['vemurafenib', 'zelboraf'],
-            'tils': ['til', 'tils', 'tumor infiltrating lymphocytes']
+        # Look for specific trials mentioned in response
+        trial_patterns = {
+            'checkmate-067': ['checkmate-067', 'checkmate067', 'cm-067', 'cm067'],
+            'relativity-047': ['relativity-047', 'relativity047', 'rel-047', 'rel047'],
+            'keynote-006': ['keynote-006', 'keynote006', 'kn-006', 'kn006'],
         }
         
-        mentioned_drugs = []
-        for drug, aliases in drug_patterns.items():
-            if any(alias in response_lower for alias in aliases):
-                mentioned_drugs.append(drug)
+        mentioned_trials = []
+        for trial, patterns in trial_patterns.items():
+            if any(pattern in response_lower or pattern in query_lower for pattern in patterns):
+                mentioned_trials.append(trial)
         
-        # Find rows that match mentioned drugs
-        for idx, row in search_results.iterrows():
-            product_name = str(row['Product/Regimen Name']).lower()
-            trial_id = str(row['Trial Acronym/ID'])
-            comparator = str(row['Comparator'])
-            
-            # Check if this row's product contains any mentioned drugs
-            drug_matches = [drug for drug in mentioned_drugs if drug in product_name]
-            
-            if drug_matches:
-                arm_id = f"{trial_id}||{row['Product/Regimen Name']}||{comparator}||{idx}"
-                if arm_id not in mentioned_arms:
-                    mentioned_arms.append(arm_id)
+        # Filter search results to only mentioned trials
+        if mentioned_trials:
+            trial_filtered_results = search_results[
+                search_results['Trial Acronym/ID'].str.lower().str.contains('|'.join(mentioned_trials), case=False, na=False)
+            ]
+        else:
+            trial_filtered_results = search_results.head(10)  # Fallback to top results
         
-        # If no specific matches, return top results based on similarity scores
-        if not mentioned_arms:
-            for idx, row in search_results.head(4).iterrows():
+        # Now apply treatment-specific filtering based on query intent
+        for idx, row in trial_filtered_results.iterrows():
+            if self._validate_arm_matches_query(row, query, response):
                 trial_id = str(row['Trial Acronym/ID'])
                 product = str(row['Product/Regimen Name'])
                 comparator = str(row['Comparator'])
-                mentioned_arms.append(f"{trial_id}||{product}||{comparator}||{idx}")
+                arm_id = f"{trial_id}||{product}||{comparator}||{idx}"
+                if arm_id not in mentioned_arms:
+                    mentioned_arms.append(arm_id)
+        
+        # If still no specific matches, return top results based on similarity scores but validate them
+        if not mentioned_arms:
+            for idx, row in search_results.head(4).iterrows():
+                if self._validate_arm_matches_query(row, query, response):
+                    trial_id = str(row['Trial Acronym/ID'])
+                    product = str(row['Product/Regimen Name'])
+                    comparator = str(row['Comparator'])
+                    mentioned_arms.append(f"{trial_id}||{product}||{comparator}||{idx}")
         
         return mentioned_arms
     
@@ -667,15 +735,30 @@ Answer:"""
         # Determine if visualization should be created
         should_visualize = self.should_create_visualization(query, response)
         
+        # Debug information - can be removed in production
+        print(f"DEBUG - should_visualize: {should_visualize}")
+        print(f"DEBUG - used_trial_arms count: {len(used_trial_arms)}")
+        print(f"DEBUG - used_trial_arms: {used_trial_arms}")
+        
         # Prepare visualization data if applicable
         viz_data = None
-        if should_visualize and used_trial_arms and not search_results.empty:
-            # Get only trial arms that LLM actually used
+        if should_visualize and not search_results.empty:
+            # Get trial arms that LLM actually used
             viz_df = self.get_trial_arms_for_visualization(used_trial_arms, search_results)
             
-            if not viz_df.empty and len(viz_df) > 1:  # Only show viz if multiple arms to compare
+            print(f"DEBUG - viz_df shape: {viz_df.shape if not viz_df.empty else 'Empty'}")
+            
+            # Lower the threshold - show visualization even with 1 arm if it's a comparison query
+            comparison_keywords = ['compare', 'comparison', 'versus', 'vs', 'and', 'between']
+            is_comparison = any(keyword in query.lower() for keyword in comparison_keywords)
+            
+            min_arms_needed = 1 if is_comparison else 2
+            
+            if not viz_df.empty and len(viz_df) >= min_arms_needed:
                 # Get metrics for visualization using LLM
                 viz_metrics = self.identify_relevant_metrics_from_context(query, response, viz_df)
+                
+                print(f"DEBUG - viz_metrics: {viz_metrics}")
                 
                 if viz_metrics:
                     viz_data = {
@@ -685,6 +768,11 @@ Answer:"""
                         'query': query,
                         'used_trial_arms': used_trial_arms
                     }
+                    print("DEBUG - viz_data created successfully")
+                else:
+                    print("DEBUG - No viz_metrics found")
+            else:
+                print(f"DEBUG - Not enough arms for visualization. Need >= {min_arms_needed}, got {len(viz_df) if not viz_df.empty else 0}")
         
         return {
             'response': response,
@@ -704,17 +792,17 @@ def get_text_color_for_theme():
 
 
 def display_bar_charts(df: pd.DataFrame, trial_col: str, metric_cols: List[str], key_prefix: str = ""):
-    """Display bar charts for metrics comparison with dynamic height and original design"""
+    """Display bar charts for metrics comparison with dynamic height and improved layout"""
     if df.empty:
         st.info("No data available for visualization")
         return
     
-    # Create display names combining trial and product for clarity
+    # Create display names combining trial and product for clarity - with better truncation
     if 'Trial Acronym/ID' in df.columns and 'Product/Regimen Name' in df.columns:
         df['Display_Name'] = df.apply(lambda row: 
-            f"{str(row['Trial Acronym/ID']).split('/')[0]} - {str(row['Product/Regimen Name'])[:40]}", axis=1)
+            f"{str(row['Trial Acronym/ID']).split('/')[0]} - {str(row['Product/Regimen Name'])[:60]}", axis=1)
     else:
-        df['Display_Name'] = df[trial_col].apply(lambda x: str(x)[:50])
+        df['Display_Name'] = df[trial_col].apply(lambda x: str(x)[:70])  # Increased character limit
     
     df_viz = df.copy()
     
@@ -732,8 +820,17 @@ def display_bar_charts(df: pd.DataFrame, trial_col: str, metric_cols: List[str],
     
     # Clean and process values
     melted["RawValue"] = melted["RawValue"].astype(str).str.strip()
-    missing_values = {"", "na", "n/a", "nr", "nan", "none", "null", "not available", "not reached"}
-    melted["IsMissing"] = melted["RawValue"].str.lower().isin(missing_values)
+    
+    # Define missing values - EXCLUDE "NR" and "Not Reached" from missing values
+    missing_values = {"", "na", "n/a", "nan", "none", "null", "not available"}
+    # Define "Not Reached" values separately - more comprehensive list
+    not_reached_values = {"nr", "not reached", "not_reached", "notreached", "not-reached"}
+    
+    # Create cleaned lowercase version for comparison
+    melted["RawValue_lower"] = melted["RawValue"].str.lower().str.strip()
+    
+    melted["IsMissing"] = melted["RawValue_lower"].isin(missing_values)
+    melted["IsNotReached"] = melted["RawValue_lower"].isin(not_reached_values)
     
     # Extract numeric values more robustly
     melted["Value"] = melted["RawValue"].str.replace('%', '', regex=False)
@@ -741,14 +838,46 @@ def display_bar_charts(df: pd.DataFrame, trial_col: str, metric_cols: List[str],
     melted["Value"] = melted["Value"].str.extract(r'([\d.]+)', expand=False)
     melted["Value"] = pd.to_numeric(melted["Value"], errors='coerce')
     
-    # Set plot values (use small value for missing data)
+    # Set plot values (use small value for missing data and NR)
     melted["PlotValue"] = melted["Value"].fillna(0)
     melted.loc[melted["IsMissing"], "PlotValue"] = 0.1
+    melted.loc[melted["IsNotReached"], "PlotValue"] = 0.1
     
-    # Create display text
-    melted["DisplayText"] = melted.apply(lambda row: 
-        "N/A" if row["IsMissing"] else 
-        row["RawValue"].upper().replace('MONTHS', '').strip(), axis=1)
+    # Create display text with more robust NR handling
+    def create_display_text(row):
+        raw_val = str(row["RawValue"]).strip()
+        raw_val_lower = raw_val.lower().strip()
+        
+        # First check for explicit NR patterns (most comprehensive)
+        if (raw_val_lower in ['nr', 'not reached', 'not_reached', 'notreached', 'not-reached'] or
+            'not reached' in raw_val_lower or 
+            raw_val_lower == 'nr' or
+            raw_val.upper() == 'NR'):
+            return "NR"
+        
+        # Check for missing/empty values
+        elif (raw_val_lower in ['', 'na', 'n/a', 'nan', 'none', 'null', 'not available'] or
+              raw_val_lower == 'nan' or 
+              pd.isna(raw_val) or
+              raw_val == '' or
+              raw_val == 'None'):
+            return "N/A"
+        
+        # Regular numeric or text values
+        else:
+            return raw_val.upper().replace('MONTHS', '').replace('MONTH', '').strip()
+    
+    melted["DisplayText"] = melted.apply(create_display_text, axis=1)
+    
+    # Additional safety check for survival metrics that might have been missed
+    survival_metrics = melted["Metric"].str.contains("OS|PFS", case=False, na=False)
+    potentially_nr = (melted["DisplayText"] == "N/A") & survival_metrics
+    
+    # If we find survival metrics showing N/A, check if raw value could be NR
+    for idx in melted[potentially_nr].index:
+        raw_val = str(melted.loc[idx, "RawValue"]).strip().upper()
+        if raw_val in ['NR', 'NOT REACHED', 'NOTREACHED', 'NOT_REACHED']:
+            melted.loc[idx, "DisplayText"] = "NR"
     
     # Create distinct colors for each trial arm (expand color palette for more arms)
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
@@ -760,9 +889,23 @@ def display_bar_charts(df: pd.DataFrame, trial_col: str, metric_cols: List[str],
     
     arm_color_map = {name: colors[i % len(colors)] for i, name in enumerate(arm_names)}
     
-    # Calculate appropriate dimensions
+    # Calculate appropriate dimensions - IMPROVED HEIGHT CALCULATION
     num_metrics = len(available_metrics)
     num_arms = len(df_viz)
+    
+    # More dynamic height calculation based on number of arms
+    if num_arms <= 2:
+        # For 2 or fewer arms, make it more compact (50% thinner as requested)
+        base_height_per_arm = 60  # Reduced from 100
+        min_height = 300
+    elif num_arms <= 4:
+        base_height_per_arm = 80
+        min_height = 400
+    else:
+        base_height_per_arm = 100
+        min_height = 500
+    
+    chart_height = max(min_height, base_height_per_arm * num_arms + 150)
     
     # Create bar chart
     fig = px.bar(
@@ -778,38 +921,78 @@ def display_bar_charts(df: pd.DataFrame, trial_col: str, metric_cols: List[str],
         title=f"Clinical Metrics Comparison"
     )
     
-    # Update layout for better appearance with dynamic sizing
+    # Update traces for better text positioning
     fig.update_traces(
         textposition="outside",
-        textfont=dict(size=10, color="black"),  # Black text for white background
-        cliponaxis=False
+        textfont=dict(size=10, color="black"),
+        cliponaxis=False,
+        # Make bars thinner for fewer rows
+        marker=dict(
+            line=dict(width=1, color='rgba(0,0,0,0.2)')
+        )
     )
     
-    # Dynamic height based on number of trial arms
-    chart_height = max(500, 100 * num_arms + 150)
-    
+    # IMPROVED LAYOUT with better margins for long labels
     fig.update_layout(
         height=chart_height,
         showlegend=False,
-        margin=dict(l=250, r=150, t=100, b=50),  # Increased left margin for longer labels
-        plot_bgcolor="white",  # White background for plot area
-        paper_bgcolor="white"  # White background for entire chart
+        # Increased left margin significantly for longer product names
+        margin=dict(l=400, r=150, t=100, b=50),  # Increased from l=250 to l=400
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        # Adjust bar spacing for thinner appearance when few rows
+        bargap=0.3 if num_arms <= 2 else 0.2  # More gap between bars for fewer arms
     )
     
     # Clean facet titles and axes
     fig.for_each_annotation(lambda a: a.update(
         text=a.text.split("=")[-1], 
-        font=dict(size=12, color="black")  # Black text for white background
+        font=dict(size=12, color="black")
     ))
+    
     fig.for_each_xaxis(lambda x: x.update(
         title='', 
         showticklabels=False,
-        gridcolor="rgba(0,0,0,0.1)"  # Light gray grid for white background
+        gridcolor="rgba(0,0,0,0.1)"
     ))
+    
+    # IMPROVED Y-AXIS formatting for better label display
     fig.for_each_yaxis(lambda y: y.update(
         title='',
-        tickfont=dict(size=9, color="black")  # Black text for white background
+        tickfont=dict(size=9, color="black"),
+        # Ensure labels don't get cut off
+        tickmode='linear',
+        # Add some padding
+        automargin=True,
+        # Wrap long text by adjusting tick text
+        tickangle=0  # Keep horizontal
     ))
+    
+    # For very long labels, we can also adjust the tick text directly
+    # This ensures product names are more visible
+    for i, trace in enumerate(fig.data):
+        if hasattr(trace, 'y') and trace.y is not None:
+            # Trace y values correspond to Display_Name
+            updated_labels = []
+            for label in trace.y:
+                if isinstance(label, str) and len(label) > 50:
+                    # Break long labels into multiple lines for better readability
+                    words = label.split(' - ')
+                    if len(words) >= 2 and len(words[1]) > 40:
+                        # Split the product name part if it's too long
+                        trial_part = words[0]
+                        product_part = words[1]
+                        if len(product_part) > 40:
+                            # Find a good breaking point
+                            mid_point = len(product_part) // 2
+                            space_near_mid = product_part.find(' ', mid_point)
+                            if space_near_mid != -1 and space_near_mid < len(product_part) - 10:
+                                product_part = product_part[:space_near_mid] + '<br>' + product_part[space_near_mid+1:]
+                        updated_labels.append(f"{trial_part} - {product_part}")
+                    else:
+                        updated_labels.append(label)
+                else:
+                    updated_labels.append(label)
     
     st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_chart")
 
@@ -825,25 +1008,7 @@ def create_visualization(viz_data: Dict[str, Any], message_idx: int):
     used_trial_arms = viz_data.get('used_trial_arms', [])
     
     if not df.empty:
-        # Create expandable section for trial arm details
-        # with st.expander("📊 **Visualization Based on Referenced Treatments**", expanded=False):
-        #     st.markdown("**Trial arms included in analysis:**")
-        #     for i, arm_id in enumerate(used_trial_arms, 1):
-        #         if '||' in arm_id:
-        #             parts = arm_id.split('||')
-        #             if len(parts) >= 4:
-        #                 trial_part, product_part, comparator_part, row_idx = parts[0], parts[1], parts[2], parts[3]
-        #                 st.markdown(f"• **{trial_part}** - {product_part} vs {comparator_part}")
-        #             elif len(parts) >= 3:
-        #                 trial_part, product_part, comparator_part = parts[0], parts[1], parts[2]
-        #                 st.markdown(f"• **{trial_part}** - {product_part} vs {comparator_part}")
-        #             else:
-        #                 trial_part, product_part = parts[0], parts[1]
-        #                 st.markdown(f"• **{trial_part}** - {product_part}")
-        #         else:
-        #             st.markdown(f"• {arm_id}")
-        
-        # Get all available metrics from the dataframe
+
         all_possible_metrics = [
             "ORR", "CR", "PR", "mPFS", "mOS", "DCR", "mDoR",
             "1-yr PFS Rate", "2-yr PFS Rate", "3-yr PFS Rate", "4-yr PFS Rate", "5-yr PFS Rate",
